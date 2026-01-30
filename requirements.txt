@@ -1,0 +1,6 @@
+discord.py
+openai
+requests
+groq
+python-dotenv
+flask

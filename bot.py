@@ -4,10 +4,11 @@ import os
 import logging
 import urllib.parse
 import random
-import requests
+import aiohttp
 import io
 import sqlite3
 import json
+import asyncio
 from groq import Groq
 from flask import Flask
 from threading import Thread
@@ -111,13 +112,16 @@ async def set_ai(ctx, channel: discord.TextChannel = None):
     await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في {target_channel.mention} بنجاح.")
 
 async def get_groq_response(messages):
+    """وظيفة غير متزامنة للحصول على رد من Groq"""
+    loop = asyncio.get_event_loop()
     for model in GROQ_MODELS:
         try:
-            response = client_groq.chat.completions.create(
+            # تشغيل طلب Groq في Thread منفصل لمنع تعليق الـ Event Loop
+            response = await loop.run_in_executor(None, lambda: client_groq.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0.7
-            )
+            ))
             return response.choices[0].message.content
         except Exception as e:
             if "429" in str(e):
@@ -125,7 +129,7 @@ async def get_groq_response(messages):
                 continue
             else:
                 raise e
-    raise Exception("All Groq models failed or hit rate limits.")
+    raise Exception("All Groq models failed.")
 
 @bot.event
 async def on_message(message):
@@ -154,7 +158,6 @@ async def on_message(message):
                             prompt_raw = user_input[len(kw):].strip()
                             break
                     
-                    # تحسين الـ Prompt بشكل بسيط وسريع
                     try:
                         enhanced_prompt = await get_groq_response([
                             {"role": "system", "content": "Convert to a short English image prompt. ONLY the prompt."},
@@ -166,14 +169,17 @@ async def on_message(message):
                     image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
                     
                     try:
-                        # إرسال الصورة مباشرة كملف لضمان الظهور
-                        response = requests.get(image_url, timeout=15)
-                        if response.status_code == 200:
-                            file = discord.File(io.BytesIO(response.content), filename="north_image.png")
-                            await message.reply(content="✨ تفضل، إليك ما طلبته:", file=file)
-                        else:
-                            await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
-                    except:
+                        # استخدام aiohttp بدلاً من requests لمنع التعليق
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(image_url, timeout=20) as resp:
+                                if resp.status == 200:
+                                    data = await resp.read()
+                                    file = discord.File(io.BytesIO(data), filename="north_image.png")
+                                    await message.reply(content="✨ تفضل، إليك ما طلبته:", file=file)
+                                else:
+                                    await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
+                    except Exception as e:
+                        logger.error(f"Image error: {e}")
                         await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
                 
                 else:

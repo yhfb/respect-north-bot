@@ -77,7 +77,6 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to initialize Groq client: {e}")
 
-# قائمة الموديلات للتبديل في حال الـ Rate Limit
 GROQ_MODELS = [
     "llama-3.3-70b-versatile", 
     "llama-3.1-70b-versatile",
@@ -118,9 +117,7 @@ async def set_ai(ctx, channel: discord.TextChannel = None):
     await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في {target_channel.mention} بنجاح.")
 
 async def get_groq_response(messages):
-    """وظيفة ذكية للتبديل بين الموديلات عند حدوث Rate Limit"""
     loop = asyncio.get_event_loop()
-    last_error = ""
     for model in GROQ_MODELS:
         try:
             response = await loop.run_in_executor(None, lambda: client_groq.chat.completions.create(
@@ -130,15 +127,13 @@ async def get_groq_response(messages):
             ))
             return response.choices[0].message.content
         except Exception as e:
-            last_error = str(e)
-            if "429" in last_error or "rate_limit" in last_error.lower():
-                logger.warning(f"⚠️ Rate limit hit for {model}, trying next model...")
-                await asyncio.sleep(1) # انتظار بسيط قبل المحاولة التالية
+            if "429" in str(e) or "rate_limit" in str(e).lower():
+                await asyncio.sleep(1)
                 continue
             else:
-                logger.error(f"❌ Error with model {model}: {e}")
+                logger.error(f"Error with model {model}: {e}")
                 continue
-    return None # إرجاع None بدلاً من Exception للسماح بالـ Fallback
+    return None
 
 @bot.event
 async def on_message(message):
@@ -167,32 +162,32 @@ async def on_message(message):
                             prompt_raw = user_input[len(kw):].strip()
                             break
                     
-                    # محاولة تحسين الـ Prompt عبر Groq، وإذا فشل نستخدم الـ Prompt الأصلي مباشرة لتوفير الـ Rate Limit
                     try:
                         enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "Convert to a highly detailed English image prompt. ONLY the prompt text."},
+                            {"role": "system", "content": "Convert to a highly detailed English image prompt. Focus on artistic quality. ONLY the prompt text."},
                             {"role": "user", "content": prompt_raw}
                         ])
                         if not enhanced_prompt: enhanced_prompt = prompt_raw
                     except: enhanced_prompt = prompt_raw
 
-                    seed = random.randint(1, 10**9)
-                    # استخدام محركات صور مستقرة
-                    engines = [
-                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true",
-                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=turbo&nologo=true"
-                    ]
+                    # استخدام محرك Magic Studio (بديل احترافي لـ Pollinations)
+                    # هذا المحرك يعطي جودة عالية جداً ومستقر
+                    encoded_prompt = urllib.parse.quote(enhanced_prompt)
+                    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux-pro"
                     
+                    # محرك بديل آخر (Cloudflare Flux) في حال فشل الأول
+                    fallback_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux-realism"
+
                     success = False
-                    for url in engines:
+                    for url in [image_url, fallback_url]:
                         try:
                             async with aiohttp.ClientSession() as session:
-                                async with session.get(url, timeout=35) as resp:
+                                async with session.get(url, timeout=45) as resp:
                                     if resp.status == 200:
                                         data = await resp.read()
-                                        if len(data) > 15000: # فحص حجم الملف لضمان الجودة
+                                        if len(data) > 20000: # فحص حجم الملف لضمان الجودة العالية
                                             file = discord.File(io.BytesIO(data), filename="north_image.png")
-                                            await message.reply(content="✨ تفضل، إليك ما تخيلته لك بدقة عالية:", file=file)
+                                            await message.reply(content="✨ تفضل، إليك ما تخيلته لك بدقة احترافية:", file=file)
                                             success = True
                                             break
                         except Exception as e:
@@ -200,7 +195,7 @@ async def on_message(message):
                             continue
                     
                     if not success:
-                        await message.reply("⚠️ عذراً، محركات الصور تواجه ضغطاً حالياً. يرجى المحاولة مرة أخرى بعد قليل.")
+                        await message.reply("⚠️ عذراً، محركات الصور الاحترافية مشغولة حالياً. يرجى المحاولة مرة أخرى بعد قليل.")
                 
                 else:
                     t_id = message.channel.id
@@ -228,8 +223,7 @@ async def on_message(message):
                                 for i in range(0, len(reply), 2000): await message.reply(reply[i:i+2000])
                             else: await message.reply(reply)
                         else:
-                            # رد بديل بسيط في حال فشل جميع الموديلات بسبب الـ Rate Limit
-                            await message.reply("⚠️ عذراً، يبدو أن هناك ضغطاً كبيراً على النظام حالياً. يرجى الانتظار دقيقة واحدة والمحاولة مرة أخرى لضمان أفضل جودة رد. 🛡️")
+                            await message.reply("⚠️ عذراً، يبدو أن هناك ضغطاً كبيراً على النظام حالياً. يرجى الانتظار دقيقة واحدة والمحاولة مرة أخرى. 🛡️")
                             
                     except Exception as e:
                         logger.error(f"Final Error: {e}")

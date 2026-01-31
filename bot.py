@@ -20,7 +20,6 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 CF_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID')
 CF_API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN')
 
-# موديلات Groq المتاحة (تم تحديثها للموديلات الحالية)
 GROQ_MODELS = [
     "llama-3.3-70b-specdec",
     "llama-3.1-8b-instant",
@@ -61,27 +60,46 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- نظام توليد الصور (Cloudflare AI) ---
-async def generate_image_cf(prompt):
-    if not CF_ACCOUNT_ID or not CF_API_TOKEN:
-        # Fallback to Pollinations if CF is not configured
-        encoded = urllib.parse.quote(prompt)
-        return f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&model=flux"
+# --- نظام توليد الصور المطور (Multi-Engine Fallback) ---
+async def generate_image(prompt):
+    encoded_prompt = urllib.parse.quote(prompt)
     
-    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/@cf/black-forest-labs/flux-1-schnell"
-    headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
-    
+    # 1. المحاولة الأولى: Cloudflare AI (إذا كان مفعلاً)
+    if CF_ACCOUNT_ID and CF_API_TOKEN:
+        url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+        headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json={"prompt": prompt}, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        if len(data) > 5000: return data, "Cloudflare AI"
+        except Exception as e:
+            logger.warning(f"Cloudflare AI failed: {e}")
+
+    # 2. المحاولة الثانية: Magic Studio (عالي الجودة)
+    magic_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux-pro"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json={"prompt": prompt}, timeout=40) as resp:
+            async with session.get(magic_url, timeout=30) as resp:
                 if resp.status == 200:
-                    return await resp.read()
-                else:
-                    logger.error(f"Cloudflare AI Error: {resp.status}")
-                    return None
+                    data = await resp.read()
+                    if len(data) > 5000: return data, "Magic Studio (Flux-Pro)"
     except Exception as e:
-        logger.error(f"Image Generation Exception: {e}")
-        return None
+        logger.warning(f"Magic Studio failed: {e}")
+
+    # 3. المحاولة الثالثة: Pollinations (الأساسي)
+    poll_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(poll_url, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    if len(data) > 5000: return data, "Pollinations (Flux)"
+    except Exception as e:
+        logger.warning(f"Pollinations failed: {e}")
+
+    return None, None
 
 # --- نظام الدردشة (Groq) ---
 async def get_chat_response(thread_id, user_input):
@@ -94,7 +112,6 @@ async def get_chat_response(thread_id, user_input):
     history.append({"role": "user", "content": user_input})
     if len(history) > 15: history = history[-15:]
     
-    # نظام الهوية الذكي: يذكر المبرمج فقط عند السؤال أو في أول رسالة
     identity_keywords = ["من برمجك", "من صنعك", "من المبرمج", "مين سواك", "who made you", "who programmed you"]
     is_asking_identity = any(kw in user_input.lower() for kw in identity_keywords)
     
@@ -158,7 +175,6 @@ async def on_message(message):
     
     ai_channel_id = get_setting('ai_channel')
     if ai_channel_id and message.channel.id == int(ai_channel_id):
-        # إنشاء ثريد تلقائي إذا لم يكن موجوداً
         if not isinstance(message.channel, discord.Thread):
             try:
                 thread = await message.create_thread(name=f"🔒 {message.author.display_name}", auto_archive_duration=60)
@@ -175,20 +191,15 @@ async def on_message(message):
                 prompt = message.content
                 for word in image_keywords: prompt = prompt.replace(word, "")
                 
-                result = await generate_image_cf(prompt.strip())
-                if isinstance(result, bytes):
-                    file = discord.File(io.BytesIO(result), filename="north_ai.png")
+                img_data, engine_name = await generate_image(prompt.strip())
+                if img_data:
+                    file = discord.File(io.BytesIO(img_data), filename="north_ai.png")
                     embed = discord.Embed(title="✨ نتيجة الخيال", color=0x2b2d31)
                     embed.set_image(url="attachment://north_ai.png")
-                    embed.set_footer(text="بواسطة ذكاء ريسبكت الشمال 🛡️")
+                    embed.set_footer(text=f"بواسطة ذكاء ريسبكت الشمال 🛡️ | المحرك: {engine_name}")
                     await message.reply(embed=embed, file=file)
-                elif isinstance(result, str): # URL Fallback
-                    embed = discord.Embed(title="✨ نتيجة الخيال", color=0x2b2d31)
-                    embed.set_image(url=result)
-                    embed.set_footer(text="بواسطة ذكاء ريسبكت الشمال 🛡️")
-                    await message.reply(embed=embed)
                 else:
-                    await message.reply("❌ عذراً، فشلت في توليد الصورة حالياً.")
+                    await message.reply("❌ عذراً، فشلت جميع محركات الصور في معالجة طلبك حالياً. يرجى المحاولة لاحقاً.")
             else:
                 response = await get_chat_response(str(message.channel.id), message.content)
                 if len(response) > 2000:

@@ -1,241 +1,210 @@
 import discord
 from discord.ext import commands
 import os
-import logging
-import urllib.parse
-import random
 import aiohttp
-import io
+import asyncio
+import logging
 import sqlite3
 import json
-import asyncio
-from groq import Groq
+import io
+import urllib.parse
 from flask import Flask
 from threading import Thread
-from dotenv import load_dotenv
 
-# تحميل متغيرات البيئة
-load_dotenv()
-
-# إعداد السجلات
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# --- الإعدادات الأساسية ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('RespectNorthBot')
 
-# --- إعداد قاعدة البيانات ---
-DB_PATH = "data/bot_database.db"
-os.makedirs("data", exist_ok=True)
+TOKEN = os.getenv('DISCORD_TOKEN')
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+CF_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID')
+CF_API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN')
+
+# موديلات Groq المتاحة (تم تحديثها للموديلات الحالية)
+GROQ_MODELS = [
+    "llama-3.3-70b-specdec",
+    "llama-3.1-8b-instant",
+    "gemma2-9b-it"
+]
+
+# --- قاعدة البيانات ---
+DB_PATH = 'data/bot_database.db'
+os.makedirs('data', exist_ok=True)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history (thread_id INTEGER PRIMARY KEY, messages TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history (thread_id TEXT PRIMARY KEY, messages TEXT)''')
     conn.commit()
     conn.close()
 
-def save_setting(key, value):
+def get_setting(key, default=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key=?", (key,))
+    res = c.fetchone()
+    conn.close()
+    return res[0] if res else default
+
+def set_setting(key, value):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
 
-def get_setting(key):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT value FROM settings WHERE key=?", (key,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
+init_db()
 
-def save_history(thread_id, messages):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO history (thread_id, messages) VALUES (?, ?)", (thread_id, json.dumps(messages)))
-    conn.commit()
-    conn.close()
+# --- إعدادات البوت ---
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-def get_history(thread_id):
+# --- نظام توليد الصور (Cloudflare AI) ---
+async def generate_image_cf(prompt):
+    if not CF_ACCOUNT_ID or not CF_API_TOKEN:
+        # Fallback to Pollinations if CF is not configured
+        encoded = urllib.parse.quote(prompt)
+        return f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&model=flux"
+    
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+    headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json={"prompt": prompt}, timeout=40) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                else:
+                    logger.error(f"Cloudflare AI Error: {resp.status}")
+                    return None
+    except Exception as e:
+        logger.error(f"Image Generation Exception: {e}")
+        return None
+
+# --- نظام الدردشة (Groq) ---
+async def get_chat_response(thread_id, user_input):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT messages FROM history WHERE thread_id=?", (thread_id,))
-    row = c.fetchone()
-    conn.close()
-    return json.loads(row[0]) if row else None
-
-init_db()
-
-# --- المفاتيح ---
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-try:
-    client_groq = Groq(api_key=GROQ_API_KEY)
-except Exception as e:
-    logger.error(f"❌ Failed to initialize Groq client: {e}")
-
-GROQ_MODELS = [
-    "llama-3.3-70b-versatile", 
-    "llama-3.1-70b-versatile",
-    "llama-3.2-90b-vision-preview",
-    "mixtral-8x7b-32768",
-    "llama-3.1-8b-instant"
-]
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.messages = True
-intents.members = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# --- خادم الويب للأبتايم ---
-app = Flask('')
-@app.route('/')
-def home(): return "Respect North Bot is Alive and Running!"
-def run_web(): app.run(host='0.0.0.0', port=8080)
-def keep_alive():
-    t = Thread(target=run_web)
-    t.daemon = True
-    t.start()
-
-@bot.event
-async def on_ready():
-    logger.info(f'🚀 Logged in as {bot.user.name}')
-    await bot.change_presence(activity=discord.Game(name="في خدمة ريسبكت الشمال 🛡️"))
-
-@bot.command()
-async def set_ai(ctx, channel: discord.TextChannel = None):
-    if not ctx.author.guild_permissions.administrator:
-        return await ctx.send("⚠️ عذراً، هذا الأمر مخصص للمسؤولين فقط.")
-    target_channel = channel or ctx.channel
-    save_setting("AI_CHANNEL_ID", target_channel.id)
-    await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في {target_channel.mention} بنجاح.")
-
-async def get_groq_response(messages):
-    loop = asyncio.get_event_loop()
+    res = c.fetchone()
+    history = json.loads(res[0]) if res else []
+    
+    history.append({"role": "user", "content": user_input})
+    if len(history) > 15: history = history[-15:]
+    
+    # نظام الهوية الذكي: يذكر المبرمج فقط عند السؤال أو في أول رسالة
+    identity_keywords = ["من برمجك", "من صنعك", "من المبرمج", "مين سواك", "who made you", "who programmed you"]
+    is_asking_identity = any(kw in user_input.lower() for kw in identity_keywords)
+    
+    system_prompt = (
+        "أنت ذكاء اصطناعي متطور تخدم في سيرفر 'ريسبكت الشمال'. "
+        "تحدث باللغة العربية الفصحى بأسلوب فخم ومهذب. "
+    )
+    
+    if is_asking_identity or len(history) <= 2:
+        system_prompt += (
+            "يجب أن تذكر بفخر: 'تمت برمجتي وتطويري بواسطة الإدارة العليا لسيرفر ريسبكت الشمال 🛡️، "
+            "وبإشراف مباشر من المبدع king to day 👑. أنا هنا لخدمتكم! ✨'"
+        )
+    
+    messages = [{"role": "system", "content": system_prompt}] + history
+    
     for model in GROQ_MODELS:
         try:
-            response = await loop.run_in_executor(None, lambda: client_groq.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.7
-            ))
-            return response.choices[0].message.content
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    json={"model": model, "messages": messages, "temperature": 0.7},
+                    timeout=15
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        ai_msg = data['choices'][0]['message']['content']
+                        history.append({"role": "assistant", "content": ai_msg})
+                        c.execute("INSERT OR REPLACE INTO history (thread_id, messages) VALUES (?, ?)", 
+                                  (thread_id, json.dumps(history)))
+                        conn.commit()
+                        conn.close()
+                        return ai_msg
+                    elif resp.status == 429:
+                        await asyncio.sleep(1)
+                        continue
         except Exception as e:
-            if "429" in str(e) or "rate_limit" in str(e).lower():
-                await asyncio.sleep(1)
-                continue
-            else:
-                logger.error(f"Error with model {model}: {e}")
-                continue
-    return None
+            logger.error(f"Error with model {model}: {e}")
+            continue
+    
+    conn.close()
+    return "عذراً، أواجه ضغطاً حالياً. حاول مجدداً بعد دقيقة. 🛡️"
+
+# --- أحداث البوت ---
+@bot.event
+async def on_ready():
+    logger.info(f"🚀 Logged in as {bot.user}")
+    await bot.change_presence(activity=discord.Game(name="خدمة ريسبكت الشمال 🛡️"))
+
+@bot.command()
+async def set_ai(ctx):
+    if not ctx.author.guild_permissions.administrator:
+        return await ctx.send("⚠️ هذا الأمر للمسؤولين فقط.")
+    set_setting('ai_channel', ctx.channel.id)
+    await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في: {ctx.channel.mention} 🛡️")
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user: return
-    await bot.process_commands(message)
-
-    ai_channel_id = get_setting("AI_CHANNEL_ID")
+    if message.author.bot: return
+    
+    ai_channel_id = get_setting('ai_channel')
     if ai_channel_id and message.channel.id == int(ai_channel_id):
+        # إنشاء ثريد تلقائي إذا لم يكن موجوداً
         if not isinstance(message.channel, discord.Thread):
             try:
-                await message.create_thread(name=f"🔒 {message.author.display_name}", auto_archive_duration=60)
+                thread = await message.create_thread(name=f"🔒 {message.author.display_name}", auto_archive_duration=60)
+                await thread.send(f"مرحباً {message.author.mention}! أنا ذكاء ريسبكت الشمال، كيف يمكنني مساعدتك اليوم؟ 🛡️")
             except: pass
             return
 
     if isinstance(message.channel, discord.Thread) and message.channel.owner_id == bot.user.id:
+        image_keywords = ["ارسم", "صورة", "تخيل", "draw", "image", "imagine"]
+        is_image_request = any(word in message.content.lower() for word in image_keywords)
+        
         async with message.channel.typing():
-            try:
-                user_input = message.content.strip()
-                if not user_input: return
-
-                img_keywords = ["صورة", "ارسم", "image", "draw", "توليد", "صمم", "تخيل"]
-                if any(user_input.lower().startswith(kw) for kw in img_keywords):
-                    prompt_raw = user_input
-                    for kw in img_keywords:
-                        if user_input.lower().startswith(kw):
-                            prompt_raw = user_input[len(kw):].strip()
-                            break
-                    
-                    try:
-                        enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "Convert to a highly detailed English image prompt. Focus on artistic quality. ONLY the prompt text."},
-                            {"role": "user", "content": prompt_raw}
-                        ])
-                        if not enhanced_prompt: enhanced_prompt = prompt_raw
-                    except: enhanced_prompt = prompt_raw
-
-                    # استخدام محرك Magic Studio (بديل احترافي لـ Pollinations)
-                    # هذا المحرك يعطي جودة عالية جداً ومستقر
-                    encoded_prompt = urllib.parse.quote(enhanced_prompt)
-                    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux-pro"
-                    
-                    # محرك بديل آخر (Cloudflare Flux) في حال فشل الأول
-                    fallback_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux-realism"
-
-                    success = False
-                    for url in [image_url, fallback_url]:
-                        try:
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(url, timeout=45) as resp:
-                                    if resp.status == 200:
-                                        data = await resp.read()
-                                        if len(data) > 20000: # فحص حجم الملف لضمان الجودة العالية
-                                            file = discord.File(io.BytesIO(data), filename="north_image.png")
-                                            await message.reply(content="✨ تفضل، إليك ما تخيلته لك بدقة احترافية:", file=file)
-                                            success = True
-                                            break
-                        except Exception as e:
-                            logger.warning(f"Engine failed: {url}, error: {e}")
-                            continue
-                    
-                    if not success:
-                        await message.reply("⚠️ عذراً، محركات الصور الاحترافية مشغولة حالياً. يرجى المحاولة مرة أخرى بعد قليل.")
+            if is_image_request:
+                prompt = message.content
+                for word in image_keywords: prompt = prompt.replace(word, "")
                 
+                result = await generate_image_cf(prompt.strip())
+                if isinstance(result, bytes):
+                    file = discord.File(io.BytesIO(result), filename="north_ai.png")
+                    embed = discord.Embed(title="✨ نتيجة الخيال", color=0x2b2d31)
+                    embed.set_image(url="attachment://north_ai.png")
+                    embed.set_footer(text="بواسطة ذكاء ريسبكت الشمال 🛡️")
+                    await message.reply(embed=embed, file=file)
+                elif isinstance(result, str): # URL Fallback
+                    embed = discord.Embed(title="✨ نتيجة الخيال", color=0x2b2d31)
+                    embed.set_image(url=result)
+                    embed.set_footer(text="بواسطة ذكاء ريسبكت الشمال 🛡️")
+                    await message.reply(embed=embed)
                 else:
-                    t_id = message.channel.id
-                    history = get_history(t_id)
-                    if not history:
-                        system_prompt = (
-                            "أنت مساعد ذكي وخبير لسيرفر ريسبكت الشمال (Respect North). "
-                            "يجب أن تكون جميع ردودك باللغة العربية الفصحى فقط بأسلوب فخم ومهذب. "
-                            "إذا سألك أحد من برمجك أو من صنعك، يجب أن تجيب دائماً وبفخر: "
-                            "'تمت برمجتي وتطويري بواسطة الإدارة العليا لسيرفر ريسبكت الشمال 🛡️، "
-                            "وبإشراف مباشر من المبدع king to day 👑. أنا هنا لخدمتكم وتقديم أفضل تجربة ذكاء اصطناعي لكم! ✨'"
-                        )
-                        history = [{"role": "system", "content": system_prompt}]
-                    
-                    history.append({"role": "user", "content": user_input})
-                    if len(history) > 16: history = [history[0]] + history[-15:]
-                    
-                    try:
-                        reply = await get_groq_response(history)
-                        if reply:
-                            history.append({"role": "assistant", "content": reply})
-                            save_history(t_id, history)
-                            
-                            if len(reply) > 2000:
-                                for i in range(0, len(reply), 2000): await message.reply(reply[i:i+2000])
-                            else: await message.reply(reply)
-                        else:
-                            await message.reply("⚠️ عذراً، يبدو أن هناك ضغطاً كبيراً على النظام حالياً. يرجى الانتظار دقيقة واحدة والمحاولة مرة أخرى. 🛡️")
-                            
-                    except Exception as e:
-                        logger.error(f"Final Error: {e}")
-                        await message.reply("⚠️ النظام يواجه ضغطاً حالياً، يرجى المحاولة بعد قليل.")
+                    await message.reply("❌ عذراً، فشلت في توليد الصورة حالياً.")
+            else:
+                response = await get_chat_response(str(message.channel.id), message.content)
+                if len(response) > 2000:
+                    for i in range(0, len(response), 2000): await message.reply(response[i:i+2000])
+                else:
+                    await message.reply(response)
+    
+    await bot.process_commands(message)
 
-            except Exception as e:
-                logger.error(f"General Error: {e}")
-                await message.reply("⚠️ حدث خطأ غير متوقع أثناء معالجة طلبك.")
+# --- Flask ---
+app = Flask('')
+@app.route('/')
+def home(): return "Bot is Online!"
+
+def run_flask(): app.run(host='0.0.0.0', port=8080)
 
 if __name__ == "__main__":
-    if DISCORD_TOKEN:
-        keep_alive()
-        bot.run(DISCORD_TOKEN)
-    else:
-        print("❌ DISCORD_TOKEN not found!")
+    Thread(target=run_flask, daemon=True).start()
+    bot.run(TOKEN)

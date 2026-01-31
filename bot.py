@@ -77,7 +77,6 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to initialize Groq client: {e}")
 
-# قائمة الموديلات للتبديل في حال الـ Rate Limit
 GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
 
 intents = discord.Intents.default()
@@ -112,11 +111,9 @@ async def set_ai(ctx, channel: discord.TextChannel = None):
     await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في {target_channel.mention} بنجاح.")
 
 async def get_groq_response(messages):
-    """وظيفة غير متزامنة للحصول على رد من Groq"""
     loop = asyncio.get_event_loop()
     for model in GROQ_MODELS:
         try:
-            # تشغيل طلب Groq في Thread منفصل لمنع تعليق الـ Event Loop
             response = await loop.run_in_executor(None, lambda: client_groq.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -124,11 +121,8 @@ async def get_groq_response(messages):
             ))
             return response.choices[0].message.content
         except Exception as e:
-            if "429" in str(e):
-                logger.warning(f"⚠️ Rate limit hit for {model}, trying next model...")
-                continue
-            else:
-                raise e
+            if "429" in str(e): continue
+            else: raise e
     raise Exception("All Groq models failed.")
 
 @bot.event
@@ -160,27 +154,34 @@ async def on_message(message):
                     
                     try:
                         enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "Convert to a short English image prompt. ONLY the prompt."},
+                            {"role": "system", "content": "Convert to a short English image prompt. ONLY the prompt text."},
                             {"role": "user", "content": prompt_raw}
                         ])
                     except: enhanced_prompt = prompt_raw
 
                     seed = random.randint(1, 10**9)
-                    image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
+                    # استخدام محرك صور أسرع وأكثر استقراراً
+                    image_url = f"https://pollinations.ai/p/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
                     
-                    try:
-                        # استخدام aiohttp بدلاً من requests لمنع التعليق
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(image_url, timeout=20) as resp:
-                                if resp.status == 200:
-                                    data = await resp.read()
-                                    file = discord.File(io.BytesIO(data), filename="north_image.png")
-                                    await message.reply(content="✨ تفضل، إليك ما طلبته:", file=file)
-                                else:
-                                    await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
-                    except Exception as e:
-                        logger.error(f"Image error: {e}")
-                        await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
+                    # إرسال الرابط فوراً كـ Embed لضمان الظهور السريع
+                    embed = discord.Embed(title="✨ إليك ما تخيلته لك:", color=discord.Color.blue())
+                    embed.set_image(url=image_url)
+                    embed.set_footer(text="بواسطة ذكاء ريسبكت الشمال 🛡️")
+                    
+                    await message.reply(embed=embed)
+                    
+                    # محاولة إرسالها كملف في الخلفية لضمان الحفظ (اختياري)
+                    async def send_as_file():
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(image_url, timeout=15) as resp:
+                                    if resp.status == 200:
+                                        data = await resp.read()
+                                        file = discord.File(io.BytesIO(data), filename="north_image.png")
+                                        await message.channel.send(file=file)
+                        except: pass
+                    
+                    asyncio.create_task(send_as_file())
                 
                 else:
                     t_id = message.channel.id

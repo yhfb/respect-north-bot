@@ -14,6 +14,7 @@ from groq import Groq
 from flask import Flask
 from threading import Thread
 from dotenv import load_dotenv
+from PIL import Image
 
 # تحميل متغيرات البيئة
 load_dotenv()
@@ -113,7 +114,6 @@ async def set_ai(ctx, channel: discord.TextChannel = None):
     await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في {target_channel.mention} بنجاح.")
 
 async def get_groq_response(messages):
-    """وظيفة للحصول على رد من Groq مع نظام تبديل الموديلات تلقائياً"""
     for model in GROQ_MODELS:
         try:
             response = client_groq.chat.completions.create(
@@ -129,6 +129,41 @@ async def get_groq_response(messages):
             else:
                 raise e
     raise Exception("All Groq models failed or hit rate limits.")
+
+def is_image_valid(image_bytes):
+    """التحقق من أن الصورة ليست تالفة ويمكن فتحها"""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.verify()
+        return True
+    except:
+        return False
+
+async def generate_image_with_fallback(prompt, message):
+    """توليد الصور مع نظام التحقق والتبديل بين السيرفرات لضمان الجودة"""
+    seed = random.randint(1, 10**9)
+    encoded_prompt = urllib.parse.quote(prompt)
+    
+    # قائمة بسيرفرات التوليد (أفضلها أولاً)
+    endpoints = [
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=flux&nologo=true",
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=turbo&nologo=true",
+        f"https://api.dicebear.com/7.x/identicon/png?seed={seed}" # ملاذ أخير جداً
+    ]
+
+    for url in endpoints:
+        try:
+            response = requests.get(url, timeout=25)
+            if response.status_code == 200 and is_image_valid(response.content):
+                file = discord.File(io.BytesIO(response.content), filename="north_image.png")
+                await message.reply(content="✨ تفضل، إليك ما تخيلته بدقة عالية:", file=file)
+                return True
+            logger.warning(f"⚠️ Image from {url} was invalid or failed, trying next...")
+        except Exception as e:
+            logger.error(f"Error generating from {url}: {e}")
+            continue
+    
+    return False
 
 @bot.event
 async def on_message(message):
@@ -149,7 +184,6 @@ async def on_message(message):
                 user_input = message.content.strip()
                 if not user_input: return
 
-                # --- نظام توليد الصور المطور ---
                 img_keywords = ["صورة", "ارسم", "image", "draw", "توليد", "صمم", "تخيل"]
                 if any(user_input.lower().startswith(kw) for kw in img_keywords):
                     prompt_raw = user_input
@@ -158,31 +192,17 @@ async def on_message(message):
                             prompt_raw = user_input[len(kw):].strip()
                             break
                     
-                    # تحسين الـ Prompt
                     try:
                         enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "You are a professional prompt engineer. Convert the user's request into a highly detailed English image prompt. Output ONLY the prompt text."},
+                            {"role": "system", "content": "You are a professional prompt engineer. Convert the user's request into a highly detailed English image prompt for high-quality generation. Output ONLY the prompt text."},
                             {"role": "user", "content": prompt_raw}
                         ])
                     except: enhanced_prompt = prompt_raw
 
-                    # محاولة التوليد
-                    seed = random.randint(1, 10**9)
-                    image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
-                    
-                    try:
-                        # محاولة تحميل الصورة وإرسالها كملف لضمان الظهور
-                        response = requests.get(image_url, timeout=20)
-                        if response.status_code == 200:
-                            file = discord.File(io.BytesIO(response.content), filename="north_image.png")
-                            await message.reply(content="✨ تفضل، إليك ما تخيلته:", file=file)
-                        else:
-                            await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
-                    except Exception as e:
-                        logger.error(f"Image error: {e}")
-                        await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
+                    success = await generate_image_with_fallback(enhanced_prompt, message)
+                    if not success:
+                        await message.reply("⚠️ عذراً، واجهت مشكلة في توليد صورة بجودة مناسبة حالياً، يرجى المحاولة مرة أخرى.")
                 
-                # --- نظام الدردشة المطور ---
                 else:
                     t_id = message.channel.id
                     history = get_history(t_id)

@@ -16,6 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # نسخ باقي ملفات المشروع
 COPY . .
 
+# إنشاء مجلد البيانات والتأكد من الصلاحيات
+RUN mkdir -p /app/data
+
 # فتح المنفذ المستخدم لخادم الأبتايم
 EXPOSE 8080
 

@@ -77,7 +77,7 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to initialize Groq client: {e}")
 
-# قائمة الموديلات للتبديل في حال الـ Rate Limit (مرتبة من الأفضل للأسرع)
+# قائمة الموديلات للتبديل في حال الـ Rate Limit
 GROQ_MODELS = [
     "llama-3.3-70b-versatile", 
     "llama-3.1-70b-versatile",
@@ -133,11 +133,12 @@ async def get_groq_response(messages):
             last_error = str(e)
             if "429" in last_error or "rate_limit" in last_error.lower():
                 logger.warning(f"⚠️ Rate limit hit for {model}, trying next model...")
+                await asyncio.sleep(1) # انتظار بسيط قبل المحاولة التالية
                 continue
             else:
                 logger.error(f"❌ Error with model {model}: {e}")
                 continue
-    raise Exception(f"All Groq models failed. Last error: {last_error}")
+    return None # إرجاع None بدلاً من Exception للسماح بالـ Fallback
 
 @bot.event
 async def on_message(message):
@@ -166,15 +167,17 @@ async def on_message(message):
                             prompt_raw = user_input[len(kw):].strip()
                             break
                     
+                    # محاولة تحسين الـ Prompt عبر Groq، وإذا فشل نستخدم الـ Prompt الأصلي مباشرة لتوفير الـ Rate Limit
                     try:
                         enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "Convert to a highly detailed English image prompt. Focus on artistic quality. ONLY the prompt text."},
+                            {"role": "system", "content": "Convert to a highly detailed English image prompt. ONLY the prompt text."},
                             {"role": "user", "content": prompt_raw}
                         ])
+                        if not enhanced_prompt: enhanced_prompt = prompt_raw
                     except: enhanced_prompt = prompt_raw
 
                     seed = random.randint(1, 10**9)
-                    # استخدام محركات صور بديلة ومستقرة
+                    # استخدام محركات صور مستقرة
                     engines = [
                         f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true",
                         f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=turbo&nologo=true"
@@ -184,11 +187,10 @@ async def on_message(message):
                     for url in engines:
                         try:
                             async with aiohttp.ClientSession() as session:
-                                async with session.get(url, timeout=30) as resp:
+                                async with session.get(url, timeout=35) as resp:
                                     if resp.status == 200:
                                         data = await resp.read()
-                                        # فحص حجم الملف لضمان أنها ليست صورة تالفة (أقل من 10 كيلوبايت غالباً تالفة)
-                                        if len(data) > 10240:
+                                        if len(data) > 15000: # فحص حجم الملف لضمان الجودة
                                             file = discord.File(io.BytesIO(data), filename="north_image.png")
                                             await message.reply(content="✨ تفضل، إليك ما تخيلته لك بدقة عالية:", file=file)
                                             success = True
@@ -198,7 +200,7 @@ async def on_message(message):
                             continue
                     
                     if not success:
-                        await message.reply("⚠️ عذراً، جميع محركات الصور مشغولة حالياً أو تعطي نتائج غير مكتملة. يرجى المحاولة مرة أخرى بعد قليل.")
+                        await message.reply("⚠️ عذراً، محركات الصور تواجه ضغطاً حالياً. يرجى المحاولة مرة أخرى بعد قليل.")
                 
                 else:
                     t_id = message.channel.id
@@ -218,16 +220,20 @@ async def on_message(message):
                     
                     try:
                         reply = await get_groq_response(history)
-                        history.append({"role": "assistant", "content": reply})
-                        save_history(t_id, history)
-                        
-                        if len(reply) > 2000:
-                            for i in range(0, len(reply), 2000): await message.reply(reply[i:i+2000])
-                        else: await message.reply(reply)
+                        if reply:
+                            history.append({"role": "assistant", "content": reply})
+                            save_history(t_id, history)
+                            
+                            if len(reply) > 2000:
+                                for i in range(0, len(reply), 2000): await message.reply(reply[i:i+2000])
+                            else: await message.reply(reply)
+                        else:
+                            # رد بديل بسيط في حال فشل جميع الموديلات بسبب الـ Rate Limit
+                            await message.reply("⚠️ عذراً، يبدو أن هناك ضغطاً كبيراً على النظام حالياً. يرجى الانتظار دقيقة واحدة والمحاولة مرة أخرى لضمان أفضل جودة رد. 🛡️")
                             
                     except Exception as e:
                         logger.error(f"Final Error: {e}")
-                        await message.reply("⚠️ عذراً، النظام يواجه ضغطاً هائلاً حالياً. يرجى الانتظار دقيقة والمحاولة مرة أخرى.")
+                        await message.reply("⚠️ النظام يواجه ضغطاً حالياً، يرجى المحاولة بعد قليل.")
 
             except Exception as e:
                 logger.error(f"General Error: {e}")

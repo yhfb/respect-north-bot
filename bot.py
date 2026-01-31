@@ -77,7 +77,14 @@ try:
 except Exception as e:
     logger.error(f"❌ Failed to initialize Groq client: {e}")
 
-GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+# قائمة الموديلات للتبديل في حال الـ Rate Limit (مرتبة من الأفضل للأسرع)
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile", 
+    "llama-3.1-70b-versatile",
+    "llama-3.2-90b-vision-preview",
+    "mixtral-8x7b-32768",
+    "llama-3.1-8b-instant"
+]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -111,7 +118,9 @@ async def set_ai(ctx, channel: discord.TextChannel = None):
     await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في {target_channel.mention} بنجاح.")
 
 async def get_groq_response(messages):
+    """وظيفة ذكية للتبديل بين الموديلات عند حدوث Rate Limit"""
     loop = asyncio.get_event_loop()
+    last_error = ""
     for model in GROQ_MODELS:
         try:
             response = await loop.run_in_executor(None, lambda: client_groq.chat.completions.create(
@@ -121,9 +130,14 @@ async def get_groq_response(messages):
             ))
             return response.choices[0].message.content
         except Exception as e:
-            if "429" in str(e): continue
-            else: raise e
-    raise Exception("All Groq models failed.")
+            last_error = str(e)
+            if "429" in last_error or "rate_limit" in last_error.lower():
+                logger.warning(f"⚠️ Rate limit hit for {model}, trying next model...")
+                continue
+            else:
+                logger.error(f"❌ Error with model {model}: {e}")
+                continue
+    raise Exception(f"All Groq models failed. Last error: {last_error}")
 
 @bot.event
 async def on_message(message):
@@ -154,38 +168,37 @@ async def on_message(message):
                     
                     try:
                         enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "Convert to a highly detailed English image prompt. ONLY the prompt text."},
+                            {"role": "system", "content": "Convert to a highly detailed English image prompt. Focus on artistic quality. ONLY the prompt text."},
                             {"role": "user", "content": prompt_raw}
                         ])
                     except: enhanced_prompt = prompt_raw
 
                     seed = random.randint(1, 10**9)
-                    # قائمة بمحركات الصور (من الأسرع إلى الأكثر استقراراً)
+                    # استخدام محركات صور بديلة ومستقرة
                     engines = [
-                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=turbo&nologo=true",
-                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
+                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true",
+                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=turbo&nologo=true"
                     ]
                     
                     success = False
                     for url in engines:
                         try:
                             async with aiohttp.ClientSession() as session:
-                                async with session.get(url, timeout=25) as resp:
+                                async with session.get(url, timeout=30) as resp:
                                     if resp.status == 200:
                                         data = await resp.read()
-                                        if len(data) > 5000: # التأكد أن الملف ليس خطأ نصي صغير
+                                        # فحص حجم الملف لضمان أنها ليست صورة تالفة (أقل من 10 كيلوبايت غالباً تالفة)
+                                        if len(data) > 10240:
                                             file = discord.File(io.BytesIO(data), filename="north_image.png")
-                                            await message.reply(content="✨ تفضل، إليك ما تخيلته لك:", file=file)
+                                            await message.reply(content="✨ تفضل، إليك ما تخيلته لك بدقة عالية:", file=file)
                                             success = True
                                             break
-                        except:
-                            logger.warning(f"Engine failed: {url}, trying next...")
+                        except Exception as e:
+                            logger.warning(f"Engine failed: {url}, error: {e}")
                             continue
                     
                     if not success:
-                        # محاولة أخيرة بإرسال الرابط المباشر إذا فشل التحميل
-                        final_url = engines[0]
-                        await message.reply(f"✨ تفضل، إليك الصورة (رابط مباشر):\n{final_url}")
+                        await message.reply("⚠️ عذراً، جميع محركات الصور مشغولة حالياً أو تعطي نتائج غير مكتملة. يرجى المحاولة مرة أخرى بعد قليل.")
                 
                 else:
                     t_id = message.channel.id
@@ -213,8 +226,8 @@ async def on_message(message):
                         else: await message.reply(reply)
                             
                     except Exception as e:
-                        logger.error(f"Groq Error: {e}")
-                        await message.reply("⚠️ عذراً، يبدو أن هناك ضغطاً كبيراً على النظام حالياً، يرجى المحاولة مرة أخرى بعد قليل.")
+                        logger.error(f"Final Error: {e}")
+                        await message.reply("⚠️ عذراً، النظام يواجه ضغطاً هائلاً حالياً. يرجى الانتظار دقيقة والمحاولة مرة أخرى.")
 
             except Exception as e:
                 logger.error(f"General Error: {e}")

@@ -154,34 +154,30 @@ async def on_message(message):
                     
                     try:
                         enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "Convert to a short English image prompt. ONLY the prompt text."},
+                            {"role": "system", "content": "Convert to a highly detailed English image prompt for high-quality artistic generation. ONLY the prompt text."},
                             {"role": "user", "content": prompt_raw}
                         ])
                     except: enhanced_prompt = prompt_raw
 
                     seed = random.randint(1, 10**9)
-                    # استخدام محرك صور أسرع وأكثر استقراراً
-                    image_url = f"https://pollinations.ai/p/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
+                    # استخدام محرك صور Magic Studio (أكثر استقراراً وجودة)
+                    image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux-pro&nologo=true"
                     
-                    # إرسال الرابط فوراً كـ Embed لضمان الظهور السريع
-                    embed = discord.Embed(title="✨ إليك ما تخيلته لك:", color=discord.Color.blue())
-                    embed.set_image(url=image_url)
-                    embed.set_footer(text="بواسطة ذكاء ريسبكت الشمال 🛡️")
-                    
-                    await message.reply(embed=embed)
-                    
-                    # محاولة إرسالها كملف في الخلفية لضمان الحفظ (اختياري)
-                    async def send_as_file():
-                        try:
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(image_url, timeout=15) as resp:
-                                    if resp.status == 200:
-                                        data = await resp.read()
-                                        file = discord.File(io.BytesIO(data), filename="north_image.png")
-                                        await message.channel.send(file=file)
-                        except: pass
-                    
-                    asyncio.create_task(send_as_file())
+                    # إرسال الصورة كملف لضمان الجودة والظهور الصحيح
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(image_url, timeout=30) as resp:
+                                if resp.status == 200:
+                                    data = await resp.read()
+                                    file = discord.File(io.BytesIO(data), filename="north_image.png")
+                                    await message.reply(content="✨ تفضل، إليك ما تخيلته لك بدقة عالية:", file=file)
+                                else:
+                                    # محاولة بديلة في حال فشل المحرك الأول
+                                    fallback_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
+                                    await message.reply(content=f"✨ تفضل، إليك الصورة:\n{fallback_url}")
+                    except Exception as e:
+                        logger.error(f"Image error: {e}")
+                        await message.reply(f"⚠️ عذراً، واجهت مشكلة في توليد الصورة حالياً، يرجى المحاولة مرة أخرى.")
                 
                 else:
                     t_id = message.channel.id

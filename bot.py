@@ -154,30 +154,38 @@ async def on_message(message):
                     
                     try:
                         enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "Convert to a highly detailed English image prompt for high-quality artistic generation. ONLY the prompt text."},
+                            {"role": "system", "content": "Convert to a highly detailed English image prompt. ONLY the prompt text."},
                             {"role": "user", "content": prompt_raw}
                         ])
                     except: enhanced_prompt = prompt_raw
 
                     seed = random.randint(1, 10**9)
-                    # استخدام محرك صور Magic Studio (أكثر استقراراً وجودة)
-                    image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux-pro&nologo=true"
+                    # قائمة بمحركات الصور (من الأسرع إلى الأكثر استقراراً)
+                    engines = [
+                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=turbo&nologo=true",
+                        f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
+                    ]
                     
-                    # إرسال الصورة كملف لضمان الجودة والظهور الصحيح
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(image_url, timeout=30) as resp:
-                                if resp.status == 200:
-                                    data = await resp.read()
-                                    file = discord.File(io.BytesIO(data), filename="north_image.png")
-                                    await message.reply(content="✨ تفضل، إليك ما تخيلته لك بدقة عالية:", file=file)
-                                else:
-                                    # محاولة بديلة في حال فشل المحرك الأول
-                                    fallback_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
-                                    await message.reply(content=f"✨ تفضل، إليك الصورة:\n{fallback_url}")
-                    except Exception as e:
-                        logger.error(f"Image error: {e}")
-                        await message.reply(f"⚠️ عذراً، واجهت مشكلة في توليد الصورة حالياً، يرجى المحاولة مرة أخرى.")
+                    success = False
+                    for url in engines:
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(url, timeout=25) as resp:
+                                    if resp.status == 200:
+                                        data = await resp.read()
+                                        if len(data) > 5000: # التأكد أن الملف ليس خطأ نصي صغير
+                                            file = discord.File(io.BytesIO(data), filename="north_image.png")
+                                            await message.reply(content="✨ تفضل، إليك ما تخيلته لك:", file=file)
+                                            success = True
+                                            break
+                        except:
+                            logger.warning(f"Engine failed: {url}, trying next...")
+                            continue
+                    
+                    if not success:
+                        # محاولة أخيرة بإرسال الرابط المباشر إذا فشل التحميل
+                        final_url = engines[0]
+                        await message.reply(f"✨ تفضل، إليك الصورة (رابط مباشر):\n{final_url}")
                 
                 else:
                     t_id = message.channel.id

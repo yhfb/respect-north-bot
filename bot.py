@@ -6,15 +6,12 @@ import urllib.parse
 import random
 import requests
 import io
-import traceback
 import sqlite3
 import json
-import asyncio
 from groq import Groq
 from flask import Flask
 from threading import Thread
 from dotenv import load_dotenv
-from PIL import Image
 
 # تحميل متغيرات البيئة
 load_dotenv()
@@ -130,41 +127,6 @@ async def get_groq_response(messages):
                 raise e
     raise Exception("All Groq models failed or hit rate limits.")
 
-def is_image_valid(image_bytes):
-    """التحقق من أن الصورة ليست تالفة ويمكن فتحها"""
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        img.verify()
-        return True
-    except:
-        return False
-
-async def generate_image_with_fallback(prompt, message):
-    """توليد الصور مع نظام التحقق والتبديل بين السيرفرات لضمان الجودة"""
-    seed = random.randint(1, 10**9)
-    encoded_prompt = urllib.parse.quote(prompt)
-    
-    # قائمة بسيرفرات التوليد (أفضلها أولاً)
-    endpoints = [
-        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=flux&nologo=true",
-        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=turbo&nologo=true",
-        f"https://api.dicebear.com/7.x/identicon/png?seed={seed}" # ملاذ أخير جداً
-    ]
-
-    for url in endpoints:
-        try:
-            response = requests.get(url, timeout=25)
-            if response.status_code == 200 and is_image_valid(response.content):
-                file = discord.File(io.BytesIO(response.content), filename="north_image.png")
-                await message.reply(content="✨ تفضل، إليك ما تخيلته بدقة عالية:", file=file)
-                return True
-            logger.warning(f"⚠️ Image from {url} was invalid or failed, trying next...")
-        except Exception as e:
-            logger.error(f"Error generating from {url}: {e}")
-            continue
-    
-    return False
-
 @bot.event
 async def on_message(message):
     if message.author == bot.user: return
@@ -192,16 +154,27 @@ async def on_message(message):
                             prompt_raw = user_input[len(kw):].strip()
                             break
                     
+                    # تحسين الـ Prompt بشكل بسيط وسريع
                     try:
                         enhanced_prompt = await get_groq_response([
-                            {"role": "system", "content": "You are a professional prompt engineer. Convert the user's request into a highly detailed English image prompt for high-quality generation. Output ONLY the prompt text."},
+                            {"role": "system", "content": "Convert to a short English image prompt. ONLY the prompt."},
                             {"role": "user", "content": prompt_raw}
                         ])
                     except: enhanced_prompt = prompt_raw
 
-                    success = await generate_image_with_fallback(enhanced_prompt, message)
-                    if not success:
-                        await message.reply("⚠️ عذراً، واجهت مشكلة في توليد صورة بجودة مناسبة حالياً، يرجى المحاولة مرة أخرى.")
+                    seed = random.randint(1, 10**9)
+                    image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
+                    
+                    try:
+                        # إرسال الصورة مباشرة كملف لضمان الظهور
+                        response = requests.get(image_url, timeout=15)
+                        if response.status_code == 200:
+                            file = discord.File(io.BytesIO(response.content), filename="north_image.png")
+                            await message.reply(content="✨ تفضل، إليك ما طلبته:", file=file)
+                        else:
+                            await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
+                    except:
+                        await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
                 
                 else:
                     t_id = message.channel.id

@@ -9,6 +9,7 @@ import io
 import traceback
 import sqlite3
 import json
+import asyncio
 from groq import Groq
 from flask import Flask
 from threading import Thread
@@ -31,9 +32,7 @@ os.makedirs("data", exist_ok=True)
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # جدول الإعدادات (مثل ID الروم المخصصة)
     c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    # جدول ذاكرة المحادثات
     c.execute('''CREATE TABLE IF NOT EXISTS history (thread_id INTEGER PRIMARY KEY, messages TEXT)''')
     conn.commit()
     conn.close()
@@ -68,7 +67,6 @@ def get_history(thread_id):
     conn.close()
     return json.loads(row[0]) if row else None
 
-# تهيئة قاعدة البيانات عند التشغيل
 init_db()
 
 # --- المفاتيح ---
@@ -76,7 +74,6 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 HF_API_KEY = os.getenv("HF_API_KEY")
 
-# تهيئة العملاء
 try:
     client_groq = Groq(api_key=GROQ_API_KEY)
 except Exception as e:
@@ -103,13 +100,12 @@ def keep_alive():
 @bot.event
 async def on_ready():
     logger.info(f'🚀 Logged in as {bot.user.name}')
-    await bot.change_presence(activity=discord.Game(name="في خدمة ريسبكت الشمال"))
+    await bot.change_presence(activity=discord.Game(name="في خدمة ريسبكت الشمال 🛡️"))
 
 @bot.command()
 async def set_ai(ctx, channel: discord.TextChannel = None):
     if not ctx.author.guild_permissions.administrator:
         return await ctx.send("⚠️ عذراً، هذا الأمر مخصص للمسؤولين فقط.")
-    
     target_channel = channel or ctx.channel
     save_setting("AI_CHANNEL_ID", target_channel.id)
     await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في {target_channel.mention} بنجاح.")
@@ -133,7 +129,7 @@ async def on_message(message):
                 user_input = message.content.strip()
                 if not user_input: return
 
-                # --- نظام توليد الصور ---
+                # --- نظام توليد الصور المطور ---
                 img_keywords = ["صورة", "ارسم", "image", "draw", "توليد", "صمم", "تخيل"]
                 if any(user_input.lower().startswith(kw) for kw in img_keywords):
                     prompt_raw = user_input
@@ -142,6 +138,7 @@ async def on_message(message):
                             prompt_raw = user_input[len(kw):].strip()
                             break
                     
+                    # تحسين الـ Prompt
                     try:
                         t_res = client_groq.chat.completions.create(
                             model="llama-3.3-70b-versatile",
@@ -153,28 +150,40 @@ async def on_message(message):
                         enhanced_prompt = t_res.choices[0].message.content
                     except: enhanced_prompt = prompt_raw
 
-                    API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-                    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-                    
+                    # محاولة التوليد مع Fallback سريع
                     success = False
-                    if HF_API_KEY:
-                        try:
-                            response = requests.post(API_URL, headers=headers, json={"inputs": enhanced_prompt}, timeout=60)
-                            if response.status_code == 200:
-                                await message.reply(file=discord.File(io.BytesIO(response.content), filename="result.png"))
-                                success = True
-                        except: pass
+                    seed = random.randint(1, 10**9)
+                    
+                    # الطريقة الأولى: Pollinations (أسرع وتظهر كصورة مباشرة)
+                    try:
+                        image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
+                        
+                        # محاولة تحميل الصورة وإرسالها كملف لضمان الظهور
+                        response = requests.get(image_url, timeout=15)
+                        if response.status_code == 200:
+                            file = discord.File(io.BytesIO(response.content), filename="north_image.png")
+                            await message.reply(content="✨ تفضل، إليك ما تخيلته:", file=file)
+                            success = True
+                    except Exception as e:
+                        logger.error(f"Image download error: {e}")
 
+                    # الطريقة الثانية: إرسال الرابط إذا فشل التحميل
                     if not success:
-                        seed = random.randint(1, 10**9)
-                        await message.reply(f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true")
+                        await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
                 
-                # --- نظام الدردشة ---
+                # --- نظام الدردشة المطور ---
                 else:
                     t_id = message.channel.id
                     history = get_history(t_id)
                     if not history:
-                        history = [{"role": "system", "content": "أنت مساعد ذكي وخبير لسيرفر ريسبكت الشمال. يجب أن تكون جميع ردودك باللغة العربية الفصحى فقط."}]
+                        system_prompt = (
+                            "أنت مساعد ذكي وخبير لسيرفر ريسبكت الشمال (Respect North). "
+                            "يجب أن تكون جميع ردودك باللغة العربية الفصحى فقط بأسلوب فخم ومهذب. "
+                            "إذا سألك أحد من برمجك أو من صنعك، يجب أن تجيب دائماً وبفخر: "
+                            "'تمت برمجتي وتطويري بواسطة الإدارة العليا لسيرفر ريسبكت الشمال 🛡️، "
+                            "وبإشراف مباشر من المبدع king to day 👑. أنا هنا لخدمتكم وتقديم أفضل تجربة ذكاء اصطناعي لكم! ✨'"
+                        )
+                        history = [{"role": "system", "content": system_prompt}]
                     
                     history.append({"role": "user", "content": user_input})
                     if len(history) > 16: history = [history[0]] + history[-15:]
@@ -195,7 +204,7 @@ async def on_message(message):
                             
                     except Exception as e:
                         logger.error(f"Groq Error: {e}")
-                        await message.reply("⚠️ عذراً، واجهت مشكلة.")
+                        await message.reply("⚠️ عذراً، واجهت مشكلة في معالجة طلبك.")
 
             except Exception as e:
                 logger.error(f"General Error: {e}")

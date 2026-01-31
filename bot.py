@@ -72,12 +72,14 @@ init_db()
 # --- المفاتيح ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-HF_API_KEY = os.getenv("HF_API_KEY")
 
 try:
     client_groq = Groq(api_key=GROQ_API_KEY)
 except Exception as e:
     logger.error(f"❌ Failed to initialize Groq client: {e}")
+
+# قائمة الموديلات للتبديل في حال الـ Rate Limit
+GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -110,6 +112,24 @@ async def set_ai(ctx, channel: discord.TextChannel = None):
     save_setting("AI_CHANNEL_ID", target_channel.id)
     await ctx.send(f"✅ تم تفعيل الذكاء الاصطناعي في {target_channel.mention} بنجاح.")
 
+async def get_groq_response(messages):
+    """وظيفة للحصول على رد من Groq مع نظام تبديل الموديلات تلقائياً"""
+    for model in GROQ_MODELS:
+        try:
+            response = client_groq.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.7
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            if "429" in str(e):
+                logger.warning(f"⚠️ Rate limit hit for {model}, trying next model...")
+                continue
+            else:
+                raise e
+    raise Exception("All Groq models failed or hit rate limits.")
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user: return
@@ -140,35 +160,26 @@ async def on_message(message):
                     
                     # تحسين الـ Prompt
                     try:
-                        t_res = client_groq.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=[
-                                {"role": "system", "content": "You are a professional prompt engineer. Convert the user's request into a highly detailed English image prompt. Output ONLY the prompt text."},
-                                {"role": "user", "content": prompt_raw}
-                            ]
-                        )
-                        enhanced_prompt = t_res.choices[0].message.content
+                        enhanced_prompt = await get_groq_response([
+                            {"role": "system", "content": "You are a professional prompt engineer. Convert the user's request into a highly detailed English image prompt. Output ONLY the prompt text."},
+                            {"role": "user", "content": prompt_raw}
+                        ])
                     except: enhanced_prompt = prompt_raw
 
-                    # محاولة التوليد مع Fallback سريع
-                    success = False
+                    # محاولة التوليد
                     seed = random.randint(1, 10**9)
+                    image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
                     
-                    # الطريقة الأولى: Pollinations (أسرع وتظهر كصورة مباشرة)
                     try:
-                        image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(enhanced_prompt)}?width=1024&height=1024&seed={seed}&model=flux&nologo=true"
-                        
                         # محاولة تحميل الصورة وإرسالها كملف لضمان الظهور
-                        response = requests.get(image_url, timeout=15)
+                        response = requests.get(image_url, timeout=20)
                         if response.status_code == 200:
                             file = discord.File(io.BytesIO(response.content), filename="north_image.png")
                             await message.reply(content="✨ تفضل، إليك ما تخيلته:", file=file)
-                            success = True
+                        else:
+                            await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
                     except Exception as e:
-                        logger.error(f"Image download error: {e}")
-
-                    # الطريقة الثانية: إرسال الرابط إذا فشل التحميل
-                    if not success:
+                        logger.error(f"Image error: {e}")
                         await message.reply(f"✨ تفضل، إليك الصورة:\n{image_url}")
                 
                 # --- نظام الدردشة المطور ---
@@ -189,12 +200,7 @@ async def on_message(message):
                     if len(history) > 16: history = [history[0]] + history[-15:]
                     
                     try:
-                        response = client_groq.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=history,
-                            temperature=0.7
-                        )
-                        reply = response.choices[0].message.content
+                        reply = await get_groq_response(history)
                         history.append({"role": "assistant", "content": reply})
                         save_history(t_id, history)
                         
@@ -204,11 +210,11 @@ async def on_message(message):
                             
                     except Exception as e:
                         logger.error(f"Groq Error: {e}")
-                        await message.reply("⚠️ عذراً، واجهت مشكلة في معالجة طلبك.")
+                        await message.reply("⚠️ عذراً، يبدو أن هناك ضغطاً كبيراً على النظام حالياً، يرجى المحاولة مرة أخرى بعد قليل.")
 
             except Exception as e:
                 logger.error(f"General Error: {e}")
-                await message.reply("⚠️ حدث خطأ غير متوقع.")
+                await message.reply("⚠️ حدث خطأ غير متوقع أثناء معالجة طلبك.")
 
 if __name__ == "__main__":
     if DISCORD_TOKEN:
